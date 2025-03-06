@@ -1,0 +1,22 @@
+{
+  "name": "telegram-gemini-bot",
+  "version": "1.0.0",
+  "description": "A Telegram bot using Gemini 2.0 via OpenRouter",
+  "main": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@openrouter/ai-sdk-provider": "^0.4.3",
+    "ai": "^4.1.54",
+    "grammy": "^1.21.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/node": "^20.11.24"
+  },
+  "packageManager": "pnpm@9.15.5+sha256.8472168c3e1fd0bff287e694b053fccbbf20579a3ff9526b6333beab8df65a8d"
+}
