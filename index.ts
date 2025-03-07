@@ -1,6 +1,8 @@
 import { Bot, Context, GrammyError, HttpError } from "grammy";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateText } from "ai";
+import * as fs from "fs";
+import * as path from "path";
 
 const requiredEnvVars = ["BOT_TOKEN", "OPENROUTER_API_KEY"];
 for (const envVar of requiredEnvVars) {
@@ -8,11 +10,62 @@ for (const envVar of requiredEnvVars) {
     throw new Error(`${envVar} is not set in environment variables`);
   }
 }
-const ALLOWED_IDS = process.env.ALLOWED_IDS?.split(",").map(Number) || [];
+
+const DATA_DIR = process.env.DATA_DIR || ".";
+const ALLOWED_USERS_FILE = path.join(DATA_DIR, "allowed_users.json");
+
+function loadAllowedUsers(): number[] {
+  try {
+    if (!fs.existsSync(ALLOWED_USERS_FILE)) {
+      fs.writeFileSync(ALLOWED_USERS_FILE, JSON.stringify([], null, 2));
+      return [];
+    }
+    const data = fs.readFileSync(ALLOWED_USERS_FILE, "utf8");
+    return JSON.parse(data);
+  } catch (error) {
+    console.error("Error loading allowed users:", error);
+    return [];
+  }
+}
+function saveAllowedUsers(users: number[]): void {
+  fs.writeFileSync(ALLOWED_USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+let ALLOWED_IDS = [
+  ...(process.env.ALLOWED_IDS?.split(",")
+    .map(Number)
+    .filter((id) => !isNaN(id)) || []),
+  ...loadAllowedUsers(),
+];
 
 const bot = new Bot(process.env.BOT_TOKEN!);
 const openrouter = createOpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY,
+});
+
+bot.command("allow_user", async (ctx) => {
+  if (!ALLOWED_IDS.includes(ctx.from?.id!)) {
+    console.log("Unauthorized user tried to add another user:", ctx.from?.id);
+    return;
+  }
+
+  const repliedMessage = ctx.message?.reply_to_message;
+  if (!repliedMessage?.from?.id) {
+    await ctx.reply(
+      "Please reply to a message from the user you want to allow."
+    );
+    return;
+  }
+
+  const userToAllow = repliedMessage.from.id;
+  if (ALLOWED_IDS.includes(userToAllow)) {
+    await ctx.reply("This user is already allowed.");
+    return;
+  }
+
+  ALLOWED_IDS.push(userToAllow);
+  saveAllowedUsers(ALLOWED_IDS);
+  await ctx.reply(`User ${userToAllow} has been added to allowed users.`);
 });
 
 bot.on("message", async (ctx: Context) => {
