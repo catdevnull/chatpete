@@ -1,8 +1,47 @@
 import { Bot, Context, GrammyError, HttpError } from "grammy";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { generateText } from "ai";
+import { CoreMessage, generateText, UIMessage } from "ai";
 import * as fs from "fs";
 import * as path from "path";
+
+type Message = {
+  id: number;
+  inReplyToId: number | null;
+  chatMessage: string;
+  timestamp: number;
+} & (
+  | {
+      username: string;
+    }
+  | { isBot: true }
+);
+
+class MessageStore {
+  private messages: Map<number, Message> = new Map();
+
+  addMessage(message: Message): void {
+    console.log("Adding message:", message);
+    this.messages.set(message.id, message);
+  }
+
+  getMessageChain(messageId: number): Message[] {
+    const chain: Message[] = [];
+    let currentId: number | null = messageId;
+
+    while (currentId !== null) {
+      const message = this.messages.get(currentId);
+      console.log(currentId, message);
+      if (!message) break;
+
+      chain.unshift(message);
+      currentId = message.inReplyToId;
+    }
+
+    return chain;
+  }
+}
+
+const messageStore = new MessageStore();
 
 const requiredEnvVars = ["BOT_TOKEN", "OPENROUTER_API_KEY"];
 for (const envVar of requiredEnvVars) {
@@ -43,34 +82,30 @@ const openrouter = createOpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY,
 });
 
-bot.command("allow_user", async (ctx) => {
-  if (!ALLOWED_IDS.includes(ctx.from?.id!)) {
-    console.log("Unauthorized user tried to add another user:", ctx.from?.id);
-    return;
-  }
-
-  const repliedMessage = ctx.message?.reply_to_message;
-  if (!repliedMessage?.from?.id) {
-    await ctx.reply(
-      "Please reply to a message from the user you want to allow."
-    );
-    return;
-  }
-
-  const userToAllow = repliedMessage.from.id;
-  if (ALLOWED_IDS.includes(userToAllow)) {
-    await ctx.reply("This user is already allowed.");
-    return;
-  }
-
-  ALLOWED_IDS.push(userToAllow);
-  saveAllowedUsers(ALLOWED_IDS);
-  await ctx.reply(`User ${userToAllow} has been added to allowed users.`);
-});
-
 bot.on("message", async (ctx: Context) => {
   if (!ALLOWED_IDS.includes(ctx.from?.id!)) {
     console.log("Unauthorized user:", ctx.from?.id);
+    return;
+  }
+
+  if (ctx.message?.text?.startsWith("/allow_user")) {
+    const repliedMessage = ctx.message?.reply_to_message;
+    if (!repliedMessage?.from?.id) {
+      await ctx.reply(
+        "Please reply to a message from the user you want to allow."
+      );
+      return;
+    }
+
+    const userToAllow = repliedMessage.from.id;
+    if (ALLOWED_IDS.includes(userToAllow)) {
+      await ctx.reply("This user is already allowed.");
+      return;
+    }
+
+    ALLOWED_IDS.push(userToAllow);
+    saveAllowedUsers(ALLOWED_IDS);
+    await ctx.reply(`User ${userToAllow} has been added to allowed users.`);
     return;
   }
 
@@ -82,13 +117,19 @@ bot.on("message", async (ctx: Context) => {
     }
 
     const isBotMentioned =
-      messageText.startsWith("/chat") || ctx.chat?.type === "private";
+      messageText.startsWith("/chat") ||
+      messageText.startsWith("/buscar") ||
+      ctx.chat?.type === "private" ||
+      ctx.message.reply_to_message?.from?.id === bot.botInfo.id;
     if (!isBotMentioned) {
       console.log("Bot not mentioned:", ctx.message?.text);
       return;
     }
 
-    const query = messageText.trim();
+    const query = messageText
+      .trim()
+      .replace(/^\/(chat|buscar)\s+/, "")
+      .trim();
     if (!query) {
       await ctx.reply("Please provide a query with your mention!");
       return;
@@ -98,7 +139,7 @@ bot.on("message", async (ctx: Context) => {
       message_thread_id: ctx.message?.message_thread_id,
     });
 
-    const model = messageText.startsWith("/buscar")
+    const model = messageText.includes("/buscar")
       ? openrouter.chat("google/gemini-2.0-flash-001", {
           extraBody: {
             plugins: [{ id: "web", max_results: 5 }],
@@ -106,28 +147,77 @@ bot.on("message", async (ctx: Context) => {
         })
       : openrouter.chat("google/gemini-2.0-flash-001");
 
+    // Get conversation context if this is a reply
+    let conversationContext;
+    const repliedToMessage = ctx.message?.reply_to_message?.message_id;
+    if (repliedToMessage) {
+      conversationContext = messageStore.getMessageChain(repliedToMessage);
+    }
+    console.log(ctx.message?.reply_to_message?.message_id, conversationContext);
+
+    const systemPrompt =
+      "Sos ChatPT, un asistente argentino que puede responder preguntas boludas. Mantené las respuestas concisas y directas al punto. Responde siempre en castellano argento.\n\n<NOMBRE> es el nombre del usuario que está hablando con vos.";
+    const messages: CoreMessage[] = [
+      { role: "system" as const, content: systemPrompt },
+      ...(conversationContext
+        ? conversationContext.map((msg) =>
+            msg.isBot
+              ? {
+                  role: "assistant" as const,
+                  content: msg.chatMessage,
+                }
+              : {
+                  role: "user" as const,
+                  content: `<${msg.username}> ${msg.chatMessage}`,
+                }
+          )
+        : []),
+      {
+        role: "user" as const,
+        content: `<${
+          ctx.from?.first_name || ctx.from?.username || "User"
+        }> ${query}`,
+      },
+    ];
+    console.log(messages);
+
     const completion = await generateText({
       model,
-      system:
-        "Sos ChatPT, un asistente argentino que puede responder preguntas boludas. Mantené las respuestas concisas y directas al punto. Responde siempre en castellano argento.",
-      messages: [{ role: "user", content: query }],
+      messages,
     });
 
-    const response =
+    const responseText =
       completion.text || "Disculpa, no puedo generar una respuesta.";
 
+    messageStore.addMessage({
+      id: ctx.message.message_id,
+      inReplyToId: repliedToMessage || null,
+      chatMessage: query,
+      timestamp: Date.now(),
+      username: ctx.from?.first_name || ctx.from?.username || "User",
+    });
+
+    let response;
     try {
-      await ctx.reply(response, {
+      response = await ctx.reply(responseText, {
         reply_to_message_id: ctx.message.message_id,
         parse_mode: "MarkdownV2",
       });
     } catch (error: unknown) {
       if (error instanceof GrammyError && error.error_code === 400) {
-        await ctx.reply(response, {
+        response = await ctx.reply(responseText, {
           reply_to_message_id: ctx.message.message_id,
         });
       } else throw error;
     }
+
+    messageStore.addMessage({
+      id: response.message_id,
+      inReplyToId: ctx.message.message_id,
+      chatMessage: responseText,
+      timestamp: Date.now(),
+      isBot: true,
+    });
   } catch (error: unknown) {
     console.error("Error in message handler:", error);
     if (error instanceof GrammyError) {

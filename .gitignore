@@ -32,3 +32,6 @@ pnpm-debug.log*
 .Trashes
 ehthumbs.db
 Thumbs.db 
+
+
+allowed_users.json
