@@ -1,8 +1,11 @@
 import { Bot, Context, GrammyError, HttpError } from "grammy";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { CoreMessage, generateText, UIMessage } from "ai";
+import { type CoreMessage, generateText } from "ai";
+import { google } from "@ai-sdk/google";
+
 import * as fs from "fs";
 import * as path from "path";
+import { escape } from "./md2tgmd";
 
 type Message = {
   id: number;
@@ -12,6 +15,8 @@ type Message = {
 } & (
   | {
       username: string;
+      wasSearch: boolean;
+      isBot: false;
     }
   | { isBot: true }
 );
@@ -50,7 +55,7 @@ for (const envVar of requiredEnvVars) {
   }
 }
 
-const DATA_DIR = process.env.DATA_DIR || ".";
+const DATA_DIR = process.env["DATA_DIR"] || ".";
 const ALLOWED_USERS_FILE = path.join(DATA_DIR, "allowed_users.json");
 
 function loadAllowedUsers(): number[] {
@@ -71,15 +76,16 @@ function saveAllowedUsers(users: number[]): void {
 }
 
 let ALLOWED_IDS = [
-  ...(process.env.ALLOWED_IDS?.split(",")
+  ...(process.env["ALLOWED_IDS"]
+    ?.split(",")
     .map(Number)
     .filter((id) => !isNaN(id)) || []),
   ...loadAllowedUsers(),
 ];
 
-const bot = new Bot(process.env.BOT_TOKEN!);
+const bot = new Bot(process.env["BOT_TOKEN"]!);
 const openrouter = createOpenRouter({
-  apiKey: process.env.OPENROUTER_API_KEY,
+  apiKey: process.env["OPENROUTER_API_KEY"],
 });
 
 bot.on("message", async (ctx: Context) => {
@@ -139,24 +145,34 @@ bot.on("message", async (ctx: Context) => {
       message_thread_id: ctx.message?.message_thread_id,
     });
 
-    const model = messageText.includes("/buscar")
-      ? openrouter.chat("google/gemini-2.0-flash-001", {
-          extraBody: {
-            plugins: [{ id: "web", max_results: 5 }],
-          },
-        })
-      : openrouter.chat("google/gemini-2.0-flash-001");
-
     // Get conversation context if this is a reply
-    let conversationContext;
+    let conversationContext: Message[] | undefined;
     const repliedToMessage = ctx.message?.reply_to_message?.message_id;
     if (repliedToMessage) {
       conversationContext = messageStore.getMessageChain(repliedToMessage);
     }
-    console.log(ctx.message?.reply_to_message?.message_id, conversationContext);
+
+    const search =
+      messageText.includes("/buscar") ||
+      (conversationContext &&
+        conversationContext.length > 0 &&
+        conversationContext.findLast(
+          (msg): msg is Message & { wasSearch: boolean } => !("isBot" in msg)
+        )?.wasSearch) ||
+      false;
+    // const model = search
+    //   ? openrouter.chat("google/gemini-2.0-flash-001", {
+    //       extraBody: {
+    //         plugins: [{ id: "web", max_results: 5 }],
+    //       },
+    //     })
+    //   : openrouter.chat("google/gemini-2.0-flash-001");
+    const model = google("gemini-2.0-flash", {
+      useSearchGrounding: search,
+    });
 
     const systemPrompt =
-      "Sos ChatPT, un asistente argentino que puede responder preguntas boludas. Mantené las respuestas concisas y directas al punto. Responde siempre en castellano argento.\n\n<NOMBRE> es el nombre del usuario que está hablando con vos.";
+      "Sos ChatPT, un asistente argentino que puede responder preguntas boludas. Mantené las respuestas concisas y directas al punto. Responde siempre en castellano argento, pero no sobreexageres.";
     const messages: CoreMessage[] = [
       { role: "system" as const, content: systemPrompt },
       ...(conversationContext
@@ -168,15 +184,13 @@ bot.on("message", async (ctx: Context) => {
                 }
               : {
                   role: "user" as const,
-                  content: `<${msg.username}> ${msg.chatMessage}`,
+                  content: `${msg.chatMessage}`,
                 }
           )
         : []),
       {
         role: "user" as const,
-        content: `<${
-          ctx.from?.first_name || ctx.from?.username || "User"
-        }> ${query}`,
+        content: `${query}`,
       },
     ];
     console.log(messages);
@@ -187,7 +201,8 @@ bot.on("message", async (ctx: Context) => {
     });
 
     const responseText =
-      completion.text || "Disculpa, no puedo generar una respuesta.";
+      escape(completion.text) || "Disculpa, no puedo generar una respuesta.";
+    console.log({ responseText });
 
     messageStore.addMessage({
       id: ctx.message.message_id,
@@ -195,6 +210,8 @@ bot.on("message", async (ctx: Context) => {
       chatMessage: query,
       timestamp: Date.now(),
       username: ctx.from?.first_name || ctx.from?.username || "User",
+      wasSearch: search,
+      isBot: false,
     });
 
     let response;
