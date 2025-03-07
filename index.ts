@@ -98,23 +98,23 @@ bot.on("message", async (ctx: Context) => {
       message_thread_id: ctx.message?.message_thread_id,
     });
 
-    const model = messageText.startsWith("/chatg")
+    const model = messageText.startsWith("/buscar")
       ? openrouter.chat("google/gemini-2.0-flash-001", {
           extraBody: {
-            plugins: [{ id: "web", max_results: 2 }],
+            plugins: [{ id: "web", max_results: 5 }],
           },
         })
-      : openrouter.chat("meta-llama/llama-3.3-70b-instruct:nitro");
+      : openrouter.chat("google/gemini-2.0-flash-001");
 
     const completion = await generateText({
       model,
       system:
-        "Eres ChatPT, un asistente útil que puede responder preguntas y ayudar con tareas. Mantén las respuestas concisas y directas al punto. Responde siempre en español.",
+        "Sos ChatPT, un asistente argentino que puede responder preguntas boludas. Mantené las respuestas concisas y directas al punto. Responde siempre en castellano argento.",
       messages: [{ role: "user", content: query }],
     });
 
     const response =
-      completion.text || "Sorry, I couldn't generate a response.";
+      completion.text || "Disculpa, no puedo generar una respuesta.";
 
     try {
       await ctx.reply(response, {
@@ -139,9 +139,7 @@ bot.on("message", async (ctx: Context) => {
     }
 
     try {
-      await ctx.reply(
-        "Sorry, I encountered an error while processing your request."
-      );
+      await ctx.reply("Disculpa, me salió un error al procesar tu solicitud.");
     } catch (e) {
       console.error("Error sending error message:", e);
     }
