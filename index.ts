@@ -12,6 +12,7 @@ type Message = {
   inReplyToId: number | null;
   chatMessage: string;
   timestamp: number;
+  imageUrl?: string;
 } & (
   | {
       username: string;
@@ -22,10 +23,9 @@ type Message = {
 );
 
 class MessageStore {
-  private messages: Map<number, Message> = new Map();
+  public messages: Map<number, Message> = new Map();
 
   addMessage(message: Message): void {
-    console.log("Adding message:", message);
     this.messages.set(message.id, message);
   }
 
@@ -35,7 +35,6 @@ class MessageStore {
 
     while (currentId !== null) {
       const message = this.messages.get(currentId);
-      console.log(currentId, message);
       if (!message) break;
 
       chain.unshift(message);
@@ -90,7 +89,6 @@ const openrouter = createOpenRouter({
 
 bot.on("message", async (ctx: Context) => {
   if (!ALLOWED_IDS.includes(ctx.from?.id!)) {
-    console.log("Unauthorized user:", ctx.from?.id);
     return;
   }
 
@@ -117,23 +115,45 @@ bot.on("message", async (ctx: Context) => {
 
   try {
     const messageText = ctx.message?.text;
-    if (!messageText) {
-      console.log("No message text:", ctx.message);
+    const hasPhoto = ctx.message?.photo && ctx.message.photo.length > 0;
+    const caption = ctx.message?.caption;
+    
+    // If it's only a photo without text/caption, just store it and don't respond
+    if (hasPhoto && !messageText && !caption) {
+      // Get image URL and store the message for context
+      const largestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
+      const file = await ctx.api.getFile(largestPhoto.file_id);
+      const imageUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+      
+      messageStore.addMessage({
+        id: ctx.message.message_id,
+        inReplyToId: ctx.message?.reply_to_message?.message_id || null,
+        chatMessage: "[Image]",
+        timestamp: Date.now(),
+        username: ctx.from?.first_name || ctx.from?.username || "User",
+        wasSearch: false,
+        isBot: false,
+        imageUrl,
+      });
+      
+      return;
+    }
+    
+    if (!messageText && !caption) {
       return;
     }
 
     const isBotMentioned =
-      messageText.startsWith("/chat") ||
-      messageText.startsWith("/buscar") ||
+      messageText?.startsWith("/chat") ||
+      messageText?.startsWith("/buscar") ||
       ctx.chat?.type === "private" ||
       ctx.message.reply_to_message?.from?.id === bot.botInfo.id;
     if (!isBotMentioned) {
-      console.log("Bot not mentioned:", ctx.message?.text);
       return;
     }
 
-    const query = messageText
-      .trim()
+    const query = (messageText || caption)
+      ?.trim()
       .replace(/^\/(chat|buscar)\s+/, "")
       .trim();
     if (!query) {
@@ -145,15 +165,32 @@ bot.on("message", async (ctx: Context) => {
       message_thread_id: ctx.message?.message_thread_id,
     });
 
-    // Get conversation context if this is a reply
+    // Get image URL if photo is present with caption
+    let imageUrl: string | undefined;
+    if (hasPhoto && caption) {
+      const largestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
+      const file = await ctx.api.getFile(largestPhoto.file_id);
+      imageUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+    }
+
+    // Get conversation context if this is a reply, or recent messages for context
     let conversationContext: Message[] | undefined;
     const repliedToMessage = ctx.message?.reply_to_message?.message_id;
     if (repliedToMessage) {
       conversationContext = messageStore.getMessageChain(repliedToMessage);
+    } else {
+      // Get recent messages from this chat as context (last 10 messages)
+      const recentMessages = Array.from(messageStore.messages.values())
+        .filter(msg => msg.timestamp > Date.now() - 10 * 60 * 1000) // last 10 minutes
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .slice(-10);
+      if (recentMessages.length > 0) {
+        conversationContext = recentMessages;
+      }
     }
 
     const search =
-      messageText.includes("/buscar") ||
+      messageText?.includes("/buscar") ||
       (conversationContext &&
         conversationContext.length > 0 &&
         conversationContext.findLast(
@@ -173,6 +210,17 @@ bot.on("message", async (ctx: Context) => {
 
     const systemPrompt =
       "Sos ChatPT, un asistente argentino que puede responder preguntas boludas. Mantené las respuestas concisas y directas al punto. Responde siempre en castellano argento, pero no sobreexageres.";
+    
+    const createMessageContent = (text: string, imageUrl?: string) => {
+      if (imageUrl) {
+        return [
+          { type: "text" as const, text },
+          { type: "image" as const, image: imageUrl }
+        ];
+      }
+      return text;
+    };
+
     const messages: CoreMessage[] = [
       { role: "system" as const, content: systemPrompt },
       ...(conversationContext
@@ -184,16 +232,15 @@ bot.on("message", async (ctx: Context) => {
                 }
               : {
                   role: "user" as const,
-                  content: `${msg.chatMessage}`,
+                  content: createMessageContent(msg.chatMessage, msg.imageUrl),
                 }
           )
         : []),
       {
         role: "user" as const,
-        content: `${query}`,
+        content: createMessageContent(query, imageUrl),
       },
     ];
-    console.log(messages);
 
     const completion = await generateText({
       model,
@@ -202,7 +249,6 @@ bot.on("message", async (ctx: Context) => {
 
     const responseText =
       escape(completion.text) || "Disculpa, no puedo generar una respuesta.";
-    console.log({ responseText });
 
     messageStore.addMessage({
       id: ctx.message.message_id,
@@ -212,6 +258,7 @@ bot.on("message", async (ctx: Context) => {
       username: ctx.from?.first_name || ctx.from?.username || "User",
       wasSearch: search,
       isBot: false,
+      imageUrl,
     });
 
     let response;
