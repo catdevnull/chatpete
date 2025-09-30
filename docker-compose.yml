@@ -1,0 +1,15 @@
+services:
+  chatpete:
+    image: ghcr.io/catdevnull/chatpete:latest
+    environment:
+      # ALLOWED_IDS: $ALLOWED_IDS
+      # BOT_TOKEN: $BOT_TOKEN
+      DATA_DIR: /data
+      # GOOGLE_GENERATIVE_AI_API_KEY: $GOOGLE_GENERATIVE_AI_API_KEY
+      # OPENROUTER_API_KEY: $OPENROUTER_API_KEY
+    env_file: .env
+    volumes:
+      - chatpete_data:/data
+
+volumes:
+  chatpete_data:
